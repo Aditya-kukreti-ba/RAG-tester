@@ -41,7 +41,7 @@ export function renderDashboard(): string {
         { icon: '💬', label: 'Query',     desc: 'You ask a security question' },
         { icon: '🔍', label: 'Retrieve',  desc: 'Top-K chunks fetched from knowledge base' },
         { icon: '📄', label: 'Augment',   desc: 'Context injected into LLM prompt' },
-        { icon: '🤖', label: 'Generate',  desc: 'qwen2.5:3b answers with grounded context' },
+        { icon: '🤖', label: 'Generate',  desc: 'Qwen2.5-3B answers with grounded context via WebGPU' },
         { icon: '✅', label: 'Response',  desc: 'Cited answer with confidence score' },
     ];
 
@@ -111,8 +111,8 @@ export function renderDashboard(): string {
                 </div>
                 <ul class="try-list">
                     <li>Click the <strong>🤖 button</strong> at the bottom-right to open the assistant</li>
-                    <li><strong>RAG ON</strong> — retrieves relevant docs → feeds as context to <code>qwen2.5:3b</code> → shows sources + confidence</li>
-                    <li><strong>RAG OFF</strong> — sends your question directly to <code>qwen2.5:3b</code> with no context</li>
+                    <li><strong>RAG ON</strong> — retrieves relevant docs → feeds as context to <code>Qwen2.5-3B</code> → shows sources + confidence</li>
+                    <li><strong>RAG OFF</strong> — sends your question directly to <code>Qwen2.5-3B</code> with no context</li>
                 </ul>
                 <div class="try-examples">
                     <span class="try-chip">What is RAG used for in a SOC?</span>
@@ -121,7 +121,7 @@ export function renderDashboard(): string {
                     <span class="try-chip">How does malware analysis use RAG?</span>
                 </div>
                 <div class="try-note">
-                    ⚠️ Requires Ollama running locally &nbsp;·&nbsp; <code>ollama serve</code> &nbsp;·&nbsp; Model: <code>qwen2.5:3b</code>
+                    ⚡ Model runs fully in your browser via <strong>WebGPU</strong> &nbsp;·&nbsp; No server needed &nbsp;·&nbsp; <code>Qwen2.5-3B-Instruct</code>
                 </div>
             </div>
 

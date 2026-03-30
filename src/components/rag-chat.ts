@@ -1,13 +1,13 @@
 /* ═══════════════════════════════════════════════════════════
-   RAG Chat — Ollama-powered assistant with live retrieval
+   RAG Chat — WebLLM-powered assistant (runs fully in-browser)
    ═══════════════════════════════════════════════════════════ */
+import * as webllm from '@mlc-ai/web-llm';
 import { isRagEnabled, setRagEnabled } from '../store';
 import { KNOWLEDGE_BASE, type KnowledgeChunk } from '../data';
 
 /* ── Config ─────────────────────────────────────────────── */
-const OLLAMA_BASE  = 'http://localhost:11434';
-const OLLAMA_MODEL = 'qwen2.5:3b'; // Change to your installed model, e.g. 'mistral', 'phi3', 'llama2'
-const TOP_K        = 3;          // How many chunks to retrieve
+const MODEL_ID = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
+const TOP_K     = 3;
 
 /* ── Types ───────────────────────────────────────────────── */
 interface ChatMessage {
@@ -24,11 +24,61 @@ interface RetrievedChunk {
     score: number;
 }
 
+/* ── Engine State ────────────────────────────────────────── */
+let engine: webllm.MLCEngine | null = null;
+let engineStatus: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
+let engineProgress  = 0;
+let engineProgressText = '';
+let engineErrorMsg  = '';
+
+async function initEngine(): Promise<void> {
+    if (engineStatus === 'ready' || engineStatus === 'loading') return;
+
+    /* Check WebGPU support */
+    if (!('gpu' in navigator)) {
+        engineStatus   = 'error';
+        engineErrorMsg = 'WebGPU is not supported in this browser. Please use Chrome 113+ or Edge 113+.';
+        mount();
+        return;
+    }
+
+    engineStatus       = 'loading';
+    engineProgress     = 0;
+    engineProgressText = 'Initialising…';
+    mount();
+
+    try {
+        engine = await webllm.CreateMLCEngine(MODEL_ID, {
+            initProgressCallback: (report: webllm.InitProgressReport) => {
+                engineProgress     = report.progress;
+                engineProgressText = report.text;
+                if (isOpen) mount();
+            },
+        });
+        engineStatus = 'ready';
+        mount();
+    } catch (err) {
+        engineStatus   = 'error';
+        engineErrorMsg = (err as Error).message;
+        mount();
+    }
+}
+
+/* ── LLM call (replaces Ollama fetch) ────────────────────── */
+async function llmChat(
+    messages: Array<{ role: string; content: string }>,
+): Promise<string> {
+    if (!engine) throw new Error('Model not ready yet.');
+
+    const reply = await engine.chat.completions.create({
+        messages: messages as webllm.ChatCompletionMessageParam[],
+        stream: false,
+    });
+
+    return reply.choices[0]?.message?.content ?? '(empty response)';
+}
+
 /* ── Retrieval ───────────────────────────────────────────── */
-/**
- * Keyword-based retrieval: scores each chunk by how many query
- * words appear in its title + content + keywords, then returns top-K.
- */
 function retrieve(query: string, topK: number = TOP_K): RetrievedChunk[] {
     const stopWords = new Set(['the','a','an','is','are','was','were','be','been',
         'have','has','had','do','does','did','will','would','could','should',
@@ -43,22 +93,13 @@ function retrieve(query: string, topK: number = TOP_K): RetrievedChunk[] {
     if (queryWords.length === 0) return [];
 
     const scored = KNOWLEDGE_BASE.map(chunk => {
-        const haystack = [
-            chunk.title,
-            chunk.content,
-            ...chunk.keywords,
-        ].join(' ').toLowerCase();
-
+        const haystack = [chunk.title, chunk.content, ...chunk.keywords].join(' ').toLowerCase();
         let score = 0;
         for (const word of queryWords) {
-            // Exact keyword match gets a bonus
             if (chunk.keywords.includes(word)) score += 3;
-            // Count occurrences in full text
             const re = new RegExp(`\\b${word}`, 'g');
             score += (haystack.match(re) || []).length;
         }
-
-        // Slight normalisation so longer docs don't dominate
         const wordCount = haystack.split(/\s+/).length;
         const normScore = (score / queryWords.length) * (100 / wordCount);
         return { chunk, score: normScore };
@@ -70,36 +111,6 @@ function retrieve(query: string, topK: number = TOP_K): RetrievedChunk[] {
         .slice(0, topK);
 }
 
-/* ── Ollama API ──────────────────────────────────────────── */
-async function ollamaChat(
-    messages: Array<{ role: string; content: string }>,
-): Promise<string> {
-    let res: Response;
-    try {
-        res = await fetch(`${OLLAMA_BASE}/api/chat`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false }),
-        });
-    } catch {
-        throw new Error(
-            `Cannot reach Ollama at ${OLLAMA_BASE}. ` +
-            `Make sure it is running: <code>ollama serve</code>`,
-        );
-    }
-
-    if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        throw new Error(
-            `Ollama returned HTTP ${res.status}. ` +
-            (body.includes('model') ? `Model <code>${OLLAMA_MODEL}</code> not found — run <code>ollama pull ${OLLAMA_MODEL}</code>` : body),
-        );
-    }
-
-    const data = await res.json();
-    return data.message?.content ?? '(empty response)';
-}
-
 /* ── Query handler ───────────────────────────────────────── */
 async function handleQuery(
     query: string,
@@ -107,58 +118,42 @@ async function handleQuery(
 ): Promise<{ text: string; sources?: string[]; confidence?: number }> {
 
     if (ragEnabled) {
-        /* --- RAG mode ---- */
         const results = retrieve(query);
 
         if (results.length === 0) {
-            /* No relevant chunks — still use Ollama but without injected context */
-            const text = await ollamaChat([
-                {
-                    role: 'system',
-                    content:
-                        'You are a knowledgeable cybersecurity and AI assistant. ' +
-                        'No relevant documents were found in the knowledge base for this query, so use your own expertise. ' +
-                        'Be conversational, helpful, and accurate.',
-                },
+            const text = await llmChat([
+                { role: 'system', content:
+                    'You are a knowledgeable cybersecurity and AI assistant. ' +
+                    'No relevant documents were found in the knowledge base for this query, so use your own expertise. ' +
+                    'Be conversational, helpful, and accurate.' },
                 { role: 'user', content: query },
             ]);
             return { text, sources: [], confidence: 0 };
         }
 
-        /* Build context block from retrieved chunks */
         const context = results
             .map(r => `### ${r.chunk.title}\n${r.chunk.content}`)
             .join('\n\n');
 
-        /* Rough confidence: map normalised score to [0.60, 0.99] */
         const maxScore   = results[0].score;
         const confidence = Math.min(0.99, 0.60 + Math.min(maxScore * 4, 0.39));
 
-        const text = await ollamaChat([
-            {
-                role: 'system',
-                content:
-                    'You are a cybersecurity and AI assistant. Use the retrieved context documents below to ground your answer. ' +
-                    'You may supplement with your own knowledge when helpful, but prioritise the context for accuracy. ' +
-                    'Be conversational, clear, and helpful.\n\n' +
-                    '--- RETRIEVED CONTEXT ---\n' + context + '\n--- END CONTEXT ---',
-            },
+        const text = await llmChat([
+            { role: 'system', content:
+                'You are a cybersecurity and AI assistant. Use the retrieved context documents below to ground your answer. ' +
+                'You may supplement with your own knowledge when helpful, but prioritise the context for accuracy. ' +
+                'Be conversational, clear, and helpful.\n\n' +
+                '--- RETRIEVED CONTEXT ---\n' + context + '\n--- END CONTEXT ---' },
             { role: 'user', content: query },
         ]);
 
-        return {
-            text,
-            sources:    results.map(r => r.chunk.title),
-            confidence,
-        };
+        return { text, sources: results.map(r => r.chunk.title), confidence };
 
     } else {
-        /* --- Basic (no-RAG) mode ---- */
-        const text = await ollamaChat([
-            {
-                role: 'system',
-                content: 'You are a knowledgeable cybersecurity and AI assistant. Chat naturally — answer any question helpfully and conversationally. You have deep expertise in threat intelligence, RAG systems, incident response, malware analysis, and AI security.',
-            },
+        const text = await llmChat([
+            { role: 'system', content:
+                'You are a knowledgeable cybersecurity and AI assistant. Chat naturally — answer any question helpfully and conversationally. ' +
+                'You have deep expertise in threat intelligence, RAG systems, incident response, malware analysis, and AI security.' },
             { role: 'user', content: query },
         ]);
         return { text };
@@ -168,48 +163,100 @@ async function handleQuery(
 /* ── Component state ─────────────────────────────────────── */
 let messages: ChatMessage[] = [];
 let isOpen    = false;
-let isWaiting = false;   // true while Ollama request is in flight
+let isWaiting = false;
 
 /* ── Render ──────────────────────────────────────────────── */
 function getHTML(): string {
-    const ragOn = isRagEnabled();
+    const ragOn    = isRagEnabled();
+    const notReady = engineStatus !== 'ready';
 
-    const messagesHTML = messages.map(m => {
-        if (m.role === 'user') {
-            return `<div class="msg msg--user">${escHtml(m.text)}</div>`;
-        }
-
-        if (m.isLoading) {
-            return `<div class="msg msg--ai msg--loading">
-                        <span class="dot-flashing"></span> Thinking…
-                    </div>`;
-        }
-
-        let extra = '';
-        if (!m.isError && m.sources !== undefined) {
-            if (m.sources.length > 0) {
-                extra += `<div class="msg__sources">
-                    <strong>Sources (${m.sources.length}):</strong><br/>
-                    ${m.sources.map(s => `<span class="msg__source-tag">${escHtml(s)}</span>`).join('')}
-                    ${m.confidence !== undefined
-                        ? `<div class="msg__confidence">⚡ Confidence: ${Math.round(m.confidence * 100)}%</div>`
-                        : ''}
-                </div>`;
-            } else {
-                extra += `<div class="msg__sources" style="opacity:.5;font-size:12px;">
-                    No relevant chunks found — answered from model's base knowledge.
-                </div>`;
+    /* ── Model loader ── */
+    let panelBody = '';
+    if (engineStatus === 'idle') {
+        panelBody = `
+            <div class="model-loader">
+                <div class="model-loader__icon">🧠</div>
+                <div class="model-loader__title">Ready to load <strong>Qwen2.5-3B</strong></div>
+                <div class="model-loader__sub">WebGPU · Runs entirely in your browser</div>
+                <div class="model-loader__note">⚡ First load downloads ~1.5 GB · Cached forever after</div>
+            </div>`;
+    } else if (engineStatus === 'loading') {
+        const pct = Math.round(engineProgress * 100);
+        const txt = engineProgressText.length > 72
+            ? engineProgressText.slice(0, 72) + '…'
+            : engineProgressText;
+        panelBody = `
+            <div class="model-loader">
+                <div class="model-loader__icon">🧠</div>
+                <div class="model-loader__title">Loading <strong>Qwen2.5-3B</strong></div>
+                <div class="model-loader__sub">WebGPU · Runs entirely in your browser</div>
+                <div class="model-loader__bar-wrap">
+                    <div class="model-loader__bar">
+                        <div class="model-loader__fill" style="width:${pct}%"></div>
+                    </div>
+                    <span class="model-loader__pct">${pct}%</span>
+                </div>
+                <div class="model-loader__text">${escHtml(txt)}</div>
+                <div class="model-loader__note">⚡ First load only · Cached forever after</div>
+            </div>`;
+    } else if (engineStatus === 'error') {
+        panelBody = `
+            <div class="model-loader">
+                <div class="model-loader__icon">⚠️</div>
+                <div class="model-loader__title">Failed to load model</div>
+                <div class="model-loader__text">${escHtml(engineErrorMsg)}</div>
+                <div class="model-loader__note">Requires Chrome 113+ or Edge 113+ with WebGPU enabled</div>
+            </div>`;
+    } else {
+        /* Ready — normal chat UI */
+        const messagesHTML = messages.map(m => {
+            if (m.role === 'user') {
+                return `<div class="msg msg--user">${escHtml(m.text)}</div>`;
             }
-        }
+            if (m.isLoading) {
+                return `<div class="msg msg--ai msg--loading"><span class="dot-flashing"></span> Thinking…</div>`;
+            }
+            let extra = '';
+            if (!m.isError && m.sources !== undefined) {
+                if (m.sources.length > 0) {
+                    extra += `<div class="msg__sources">
+                        <strong>Sources (${m.sources.length}):</strong><br/>
+                        ${m.sources.map(s => `<span class="msg__source-tag">${escHtml(s)}</span>`).join('')}
+                        ${m.confidence !== undefined
+                            ? `<div class="msg__confidence">⚡ Confidence: ${Math.round(m.confidence * 100)}%</div>`
+                            : ''}
+                    </div>`;
+                } else {
+                    extra += `<div class="msg__sources" style="opacity:.5;font-size:12px;">
+                        No relevant chunks found — answered from model knowledge.
+                    </div>`;
+                }
+            }
+            const cls  = m.isError ? 'msg msg--ai msg--error' : 'msg msg--ai';
+            const body = m.isError ? escHtml(m.text) : renderMarkdown(m.text);
+            return `<div class="${cls}"><div class="msg__body">${body}</div>${extra}</div>`;
+        }).join('');
 
-        const cls = m.isError ? 'msg msg--ai msg--error' : 'msg msg--ai';
-        const body = m.isError ? escHtml(m.text) : renderMarkdown(m.text);
-        return `<div class="${cls}"><div class="msg__body">${body}</div>${extra}</div>`;
-    }).join('');
+        const placeholder = ragOn
+            ? 'Ask anything — RAG will retrieve context…'
+            : 'Ask anything — direct WebLLM query…';
 
-    const placeholder = ragOn
-        ? 'Ask anything — RAG will retrieve context…'
-        : 'Ask anything — direct Ollama query…';
+        panelBody = `
+            <div class="rag-panel__messages" id="rag-messages">
+                ${messages.length === 0 ? `
+                    <div class="msg msg--ai msg--welcome">
+                        <div class="msg__welcome-icon">🤖</div>
+                        <div class="msg__body">
+                            ${renderMarkdown(`Hey! I'm your **cybersecurity + RAG** assistant, running on \`${MODEL_ID}\` — fully in your browser via WebGPU.\n\n**RAG ON** — I search the knowledge base first and ground my answer with retrieved docs + sources.\n\n**RAG OFF** — I chat directly from my own knowledge, no retrieval.\n\nAsk me anything — security questions, RAG concepts, CVEs, threats, or just chat 💬`)}
+                        </div>
+                    </div>
+                ` : messagesHTML}
+            </div>
+            <div class="rag-panel__input">
+                <input type="text" id="rag-input" placeholder="${placeholder}" ${isWaiting ? 'disabled' : ''} />
+                <button id="rag-send" ${isWaiting ? 'disabled' : ''}>→</button>
+            </div>`;
+    }
 
     return `
     <!-- FAB -->
@@ -226,10 +273,13 @@ function getHTML(): string {
     <div class="rag-panel ${isOpen ? 'rag-panel--open' : ''}" id="rag-panel">
 
         <div class="rag-panel__header">
-            <span class="rag-panel__title">🤖 RAG Assistant <small style="font-size:11px;opacity:.5;">${OLLAMA_MODEL}</small></span>
+            <span class="rag-panel__title">🤖 RAG Assistant
+                <small style="font-size:11px;opacity:.5;">Qwen2.5-3B · WebGPU</small>
+            </span>
             <button class="rag-panel__close" id="rag-close">✕</button>
         </div>
 
+        ${!notReady ? `
         <div class="rag-panel__toggle-bar">
             <div class="rag-status ${ragOn ? 'rag-status--on' : ''}" id="rag-status">
                 <span class="rag-status__dot"></span>
@@ -239,23 +289,9 @@ function getHTML(): string {
                 <span class="toggle__label">RAG</span>
                 <div class="toggle__track"><div class="toggle__thumb"></div></div>
             </div>
-        </div>
+        </div>` : ''}
 
-        <div class="rag-panel__messages" id="rag-messages">
-            ${messages.length === 0 ? `
-                <div class="msg msg--ai msg--welcome">
-                    <div class="msg__welcome-icon">🤖</div>
-                    <div class="msg__body">
-                        ${renderMarkdown(`Hey! I'm your **cybersecurity + RAG** assistant, running on \`${OLLAMA_MODEL}\` locally.\n\n**RAG ON** — I search the knowledge base first and ground my answer with retrieved docs + sources.\n\n**RAG OFF** — I chat directly from my own knowledge, no retrieval.\n\nAsk me anything — security questions, RAG concepts, CVEs, threats, or just chat 💬`)}
-                    </div>
-                </div>
-            ` : messagesHTML}
-        </div>
-
-        <div class="rag-panel__input">
-            <input type="text" id="rag-input" placeholder="${placeholder}" ${isWaiting ? 'disabled' : ''} />
-            <button id="rag-send" ${isWaiting ? 'disabled' : ''}>→</button>
-        </div>
+        ${panelBody}
     </div>
     `;
 }
@@ -269,17 +305,10 @@ function escHtml(s: string): string {
         .replace(/"/g, '&quot;');
 }
 
-/**
- * Lightweight markdown → HTML renderer.
- * Handles: headings, bold, italic, inline code, code blocks,
- * ordered lists, unordered lists, horizontal rules, paragraphs.
- */
 function renderMarkdown(raw: string): string {
     const lines = raw.split('\n');
     const out: string[] = [];
-    let inUl = false;
-    let inOl = false;
-    let inCode = false;
+    let inUl = false, inOl = false, inCode = false;
     let codeLines: string[] = [];
 
     function closeList() {
@@ -289,54 +318,33 @@ function renderMarkdown(raw: string): string {
 
     function inlineFormat(text: string): string {
         return text
-            // inline code (must come before bold/italic)
             .replace(/`([^`]+)`/g, '<code>$1</code>')
-            // bold
             .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
             .replace(/__(.+?)__/g, '<strong>$1</strong>')
-            // italic
             .replace(/\*(.+?)\*/g, '<em>$1</em>')
             .replace(/_(.+?)_/g, '<em>$1</em>');
     }
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        // ── fenced code block ──────────────────────────
+    for (const line of lines) {
         if (line.trim().startsWith('```')) {
-            if (!inCode) {
-                closeList();
-                inCode = true;
-                codeLines = [];
-            } else {
-                out.push(`<pre><code>${escHtml(codeLines.join('\n'))}</code></pre>`);
-                inCode = false;
-                codeLines = [];
-            }
+            if (!inCode) { closeList(); inCode = true; codeLines = []; }
+            else { out.push(`<pre><code>${escHtml(codeLines.join('\n'))}</code></pre>`); inCode = false; codeLines = []; }
             continue;
         }
         if (inCode) { codeLines.push(line); continue; }
+        if (/^[-*_]{3,}$/.test(line.trim())) { closeList(); out.push('<hr/>'); continue; }
 
-        // ── horizontal rule ────────────────────────────
-        if (/^[-*_]{3,}$/.test(line.trim())) {
-            closeList();
-            out.push('<hr/>');
-            continue;
-        }
-
-        // ── headings ───────────────────────────────────
         const h3 = line.match(/^###\s+(.*)/);
         const h2 = line.match(/^##\s+(.*)/);
         const h1 = line.match(/^#\s+(.*)/);
         if (h1 || h2 || h3) {
             closeList();
-            const lvl = h3 ? 3 : h2 ? 2 : 1;
+            const lvl  = h3 ? 3 : h2 ? 2 : 1;
             const text = (h3 || h2 || h1)![1];
             out.push(`<h${lvl} class="md-h${lvl}">${inlineFormat(escHtml(text))}</h${lvl}>`);
             continue;
         }
 
-        // ── unordered list ─────────────────────────────
         const ulMatch = line.match(/^[\-\*\+]\s+(.*)/);
         if (ulMatch) {
             if (inOl) { out.push('</ol>'); inOl = false; }
@@ -345,7 +353,6 @@ function renderMarkdown(raw: string): string {
             continue;
         }
 
-        // ── ordered list ───────────────────────────────
         const olMatch = line.match(/^\d+\.\s+(.*)/);
         if (olMatch) {
             if (inUl) { out.push('</ul>'); inUl = false; }
@@ -354,21 +361,13 @@ function renderMarkdown(raw: string): string {
             continue;
         }
 
-        // ── blank line ─────────────────────────────────
-        if (line.trim() === '') {
-            closeList();
-            out.push('<div class="md-spacer"></div>');
-            continue;
-        }
-
-        // ── regular paragraph line ─────────────────────
+        if (line.trim() === '') { closeList(); out.push('<div class="md-spacer"></div>'); continue; }
         closeList();
         out.push(`<p class="md-p">${inlineFormat(escHtml(line))}</p>`);
     }
 
     closeList();
     if (inCode) out.push(`<pre><code>${escHtml(codeLines.join('\n'))}</code></pre>`);
-
     return out.join('');
 }
 
@@ -395,14 +394,10 @@ function bindEvents(): void {
     /* 3-D tilt on mousemove */
     fab?.addEventListener('mousemove', (e: MouseEvent) => {
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const cx = rect.left + rect.width  / 2;
-        const cy = rect.top  + rect.height / 2;
-        const dx = (e.clientX - cx) / (rect.width  / 2);   // -1 → 1
-        const dy = (e.clientY - cy) / (rect.height / 2);   // -1 → 1
-        const rotX = -dy * 22;
-        const rotY =  dx * 22;
+        const dx   = (e.clientX - rect.left  - rect.width  / 2) / (rect.width  / 2);
+        const dy   = (e.clientY - rect.top   - rect.height / 2) / (rect.height / 2);
         (e.currentTarget as HTMLElement).style.transform =
-            `perspective(300px) rotateX(${rotX}deg) rotateY(${rotY}deg) scale(1.12)`;
+            `perspective(300px) rotateX(${-dy * 22}deg) rotateY(${dx * 22}deg) scale(1.12)`;
     });
 
     fab?.addEventListener('mouseleave', (e: MouseEvent) => {
@@ -412,6 +407,7 @@ function bindEvents(): void {
     fab?.addEventListener('click', () => {
         isOpen = true;
         mount();
+        initEngine();          // start loading model (no-op if already loading/ready)
         setTimeout(() => document.getElementById('rag-input')?.focus(), 350);
     });
 
@@ -435,10 +431,7 @@ function bindEvents(): void {
         const query = input.value.trim();
         input.value = '';
 
-        /* Add user bubble */
         messages.push({ role: 'user', text: query });
-
-        /* Add loading placeholder */
         const loadingIdx = messages.length;
         messages.push({ role: 'ai', text: '', isLoading: true });
 
@@ -448,19 +441,12 @@ function bindEvents(): void {
 
         try {
             const result = await handleQuery(query, isRagEnabled());
-            /* Replace loading placeholder with real answer */
             messages[loadingIdx] = {
-                role:       'ai',
-                text:       result.text,
-                sources:    result.sources,
-                confidence: result.confidence,
+                role: 'ai', text: result.text,
+                sources: result.sources, confidence: result.confidence,
             };
         } catch (err) {
-            messages[loadingIdx] = {
-                role:    'ai',
-                text:    (err as Error).message,
-                isError: true,
-            };
+            messages[loadingIdx] = { role: 'ai', text: (err as Error).message, isError: true };
         } finally {
             isWaiting = false;
             mount();
