@@ -6,7 +6,7 @@ import { isRagEnabled, setRagEnabled } from '../store';
 import { KNOWLEDGE_BASE, type KnowledgeChunk } from '../data';
 
 /* ── Config ─────────────────────────────────────────────── */
-const MODEL_ID = 'Qwen2.5-3B-Instruct-q4f16_1-MLC';
+const MODEL_ID = 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC';
 const TOP_K     = 3;
 
 /* ── Types ───────────────────────────────────────────────── */
@@ -188,7 +188,7 @@ function getHTML(): string {
         panelBody = `
             <div class="model-loader">
                 <div class="model-loader__icon">🧠</div>
-                <div class="model-loader__title">Loading <strong>Qwen2.5-3B</strong></div>
+                <div class="model-loader__title">Loading <strong>Qwen2.5-0.5B</strong></div>
                 <div class="model-loader__sub">WebGPU · Runs entirely in your browser</div>
                 <div class="model-loader__bar-wrap">
                     <div class="model-loader__bar">
