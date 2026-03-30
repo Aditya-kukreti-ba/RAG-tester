@@ -24,6 +24,7 @@ function renderNav(): string {
         <ul class="nav__links">
             <li>
                 <button class="nav__link nav__user-btn" id="nav-logout" title="Sign out">
+                    <span class="nav__initials">${initials}</span>
                     <svg class="nav__logout-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
                         <polyline points="16 17 21 12 16 7"/>
