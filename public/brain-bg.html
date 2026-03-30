@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brain Background</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body { overflow: hidden; background: #0a0604; }
+        canvas { display: block; pointer-events: none; }
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        /* ── CONFIG ── */
+        const COUNT     = 15000;
+        const SPEED_MULT = 0.8;
+
+        /* ── SCENE SETUP ── */
+        const scene    = new THREE.Scene();
+        scene.fog      = new THREE.FogExp2(0x0a0604, 0.012);
+        const camera   = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 2000);
+        camera.position.set(0, 0, 100);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setClearColor(0x0a0604, 1);
+        document.body.appendChild(renderer.domElement);
+
+        /* ── POST-PROCESSING ── */
+        const composer  = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        const bloom     = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.5, 0.4, 0.85);
+        bloom.strength  = 1.4;
+        bloom.radius    = 0.6;
+        bloom.threshold = 0.05;
+        composer.addPass(bloom);
+
+        /* ── INSTANCED MESH ── */
+        const dummy     = new THREE.Object3D();
+        const color     = new THREE.Color();
+        const target    = new THREE.Vector3();
+        const geometry  = new THREE.TetrahedronGeometry(0.2);
+        const material  = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        const mesh      = new THREE.InstancedMesh(geometry, material, COUNT);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        scene.add(mesh);
+
+        /* ── PARTICLE DATA ── */
+        const positions = [];
+        for (let i = 0; i < COUNT; i++) {
+            positions.push(new THREE.Vector3(
+                (Math.random() - 0.5) * 100,
+                (Math.random() - 0.5) * 100,
+                (Math.random() - 0.5) * 100
+            ));
+            mesh.setColorAt(i, color.setHex(0xD6B588));
+        }
+
+        /* Cappuccino-tinted hue ranges */
+        const HUES = {
+            soma:    { base: 0.08, shift: 0.04 },   /* warm gold */
+            dendrite:{ base: 0.06, shift: 0.05 },   /* amber */
+            axon:    { base: 0.10, shift: 0.03 },   /* bronze */
+            neuro:   { base: 0.07, shift: 0.06 }    /* honey */
+        };
+
+        const PARAMS = { pulseSpeed: 1.0, synapticFire: 0.45, brainScale: 40, axonDensity: 2.2, nebulaMix: 0.3 };
+
+        /* ── SLOW AUTO-ROTATE ── */
+        let autoAngle = 0;
+
+        /* ── ANIMATION ── */
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            const time  = clock.getElapsedTime() * SPEED_MULT;
+
+            autoAngle += delta * 0.15;
+            camera.position.x = Math.sin(autoAngle) * 105;
+            camera.position.z = Math.cos(autoAngle) * 105;
+            camera.position.y = Math.sin(autoAngle * 0.5) * 15;
+            camera.lookAt(0, 0, 0);
+
+            const { pulseSpeed, synapticFire, brainScale, axonDensity, nebulaMix } = PARAMS;
+
+            for (let i = 0; i < COUNT; i++) {
+                const t     = time * pulseSpeed;
+                const norm  = i / COUNT;
+                const layer = i % 7;
+                const seed  = i * 1.6180339887;
+                const seedB = i * 2.2360679774;
+                const seedC = i * 0.7071067811;
+
+                /* Brain shape */
+                const lobeAngle = seed  * 6.2831853;
+                const lobeTheta = seedB * 3.1415926;
+                const lobeR     = brainScale * (0.75 + 0.25 * Math.sin(lobeTheta * 3.0));
+                const rawX      = lobeR * Math.sin(lobeTheta) * Math.cos(lobeAngle);
+                const rawY      = lobeR * 0.72 * Math.cos(lobeTheta);
+                const rawZ      = lobeR * Math.sin(lobeTheta) * Math.sin(lobeAngle);
+                const hemi      = rawX > 0 ? 1.0 : -1.0;
+                const indent    = Math.exp(-rawY * rawY * 0.002) * 6.0;
+                const bx = rawX + hemi * indent;
+                const by = rawY;
+                const bz = rawZ;
+
+                let px, py, pz, hue, sat, lit;
+
+                if (layer <= 1) {
+                    /* SOMA — warm gold */
+                    const jitter = 1.8;
+                    const wave   = Math.sin(t * 0.7 + seed * 12.0) * 0.9;
+                    px = bx + Math.sin(seedC * 77.1 + t * 0.30) * jitter;
+                    py = by + Math.cos(seedC * 53.3 + t * 0.20) * jitter + wave;
+                    pz = bz + Math.sin(seedC * 31.7 + t * 0.25) * jitter;
+                    hue = HUES.soma.base + nebulaMix * HUES.soma.shift + 0.03 * Math.sin(norm * 9.1 + t * 0.4);
+                    sat = 0.65;
+                    lit = 0.45 + 0.25 * Math.abs(Math.sin(t * 1.1 + seed * 5.0));
+
+                } else if (layer <= 3) {
+                    /* DENDRITES — amber */
+                    const branchFrac = seed * 43.758 - Math.floor(seed * 43.758);
+                    const arm        = Math.floor(branchFrac * 6.0);
+                    const tAlong     = branchFrac * 6.0 - arm;
+                    const armAng     = arm * 1.0471975 + seedC * 0.8 + t * 0.18;
+                    const armLen     = axonDensity * (4.0 + 6.0 * tAlong);
+                    const dWave      = Math.sin(t * 1.3 + seed * 8.2) * 1.2;
+                    px = bx + Math.cos(armAng) * armLen + dWave * 0.4;
+                    py = by + Math.sin(armAng * 0.7) * armLen * 0.5 + dWave;
+                    pz = bz + Math.sin(armAng) * armLen * 0.8;
+                    hue = HUES.dendrite.base + nebulaMix * HUES.dendrite.shift + 0.04 * Math.sin(norm * 14.0 + t * 0.6);
+                    sat = 0.7;
+                    lit = 0.38 + 0.30 * tAlong;
+
+                } else if (layer <= 5) {
+                    /* AXONS — bronze */
+                    const fiberFrac  = seedC * 7919.0 - Math.floor(seedC * 7919.0);
+                    const fiberIdx   = Math.floor(fiberFrac * 120.0);
+                    const fiberAng   = fiberIdx * 0.5235987756;
+                    const fiberPos   = seedB * 3.141592 - Math.floor(seedB * 3.141592);
+                    const fiberPulse = Math.sin(t * 2.1 + fiberPos * 6.28318 + fiberIdx * 1.1) * synapticFire;
+                    const fiberRad   = 3.5 + 2.0 * Math.sin(fiberIdx * 0.73);
+                    const along      = (fiberPos - 0.5) * brainScale * 1.35;
+                    px = Math.cos(fiberAng) * fiberRad * (1.0 + 0.18 * fiberPulse) + along * Math.sin(fiberAng * 0.5) * 0.25;
+                    py = along * 0.55 * Math.cos(fiberAng * 0.31) + fiberPulse * 3.5;
+                    pz = Math.sin(fiberAng) * fiberRad * (1.0 + 0.18 * fiberPulse) + along * Math.cos(fiberAng * 0.5) * 0.25;
+                    hue = HUES.axon.base + nebulaMix * HUES.axon.shift + 0.04 * Math.sin(fiberPos * 18.0 + t * 1.8);
+                    sat = 0.75;
+                    lit = 0.30 + 0.40 * Math.abs(fiberPulse);
+
+                } else {
+                    /* NEUROTRANSMITTERS — honey sparks */
+                    const ntA  = seedC * 9973.0 - Math.floor(seedC * 9973.0);
+                    const ntB  = seedB * 6271.0 - Math.floor(seedB * 6271.0);
+                    const synX = (ntA - 0.5) * brainScale * 1.6;
+                    const synY = (ntB - 0.5) * brainScale * 1.2;
+                    const synZ = Math.sin(ntA * 7.3) * brainScale * 0.5;
+                    const tPh    = t * 3.5 + ntA * 6.2831853;
+                    const orbitR = 1.2 + 1.8 * synapticFire;
+                    px = synX + Math.cos(tPh) * orbitR;
+                    py = synY + Math.sin(tPh * 1.31) * orbitR * 0.6;
+                    pz = synZ + Math.sin(tPh * 0.77) * orbitR;
+                    hue = HUES.neuro.base + nebulaMix * HUES.neuro.shift + 0.05 * Math.sin(ntA * 22.0 + t * 4.5);
+                    sat = 0.9;
+                    lit = 0.50 + 0.45 * Math.abs(Math.sin(tPh * 1.7));
+                }
+
+                /* Global rotation */
+                const rotAngle = t * 0.09;
+                const cosR = Math.cos(rotAngle);
+                const sinR = Math.sin(rotAngle);
+                const finalX = px * cosR - pz * sinR;
+                const finalZ = px * sinR + pz * cosR;
+
+                target.set(finalX, py, finalZ);
+                color.setHSL(hue, sat, lit);
+
+                positions[i].lerp(target, 0.08);
+                dummy.position.copy(positions[i]);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+                mesh.setColorAt(i, color);
+            }
+
+            mesh.instanceMatrix.needsUpdate = true;
+            mesh.instanceColor.needsUpdate  = true;
+            composer.render();
+        }
+        animate();
+
+        /* ── RESIZE ── */
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+            composer.setSize(innerWidth, innerHeight);
+        });
+    </script>
+</body>
+</html>
